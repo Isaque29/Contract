@@ -4,15 +4,15 @@ namespace Contract.Lib;
 
 /// <summary>
 /// Public class Loader that provides:
-/// - Initialization and reloading of a main Lua file (default /Mod/manifest.lua)
+/// - Initialization and reloading of a main Lua file (default /Content/Lua/manifest.lua)
 /// - Simplified access to nested values ​​via Loader.Load<T>("a.b.c")
 /// - TryLoad<T>() and Load<T>(path, defaultValue)
 /// - Guaranteed require() functionality for modules in Content/Lua (with caching similar to package.loaded)
-/// - Reading Lua source code in /Mod
+/// - Reading Lua source code in /Content/Lua
 /// - Version lookup (GetVersion)
 ///
 /// Design notes:
-/// - Require resolves modules by querying /Mod/<name>.lua and /Mod/<name>/manifest.lua
+/// - Require resolves modules by querying /Content/Lua/<name>.lua and /Content/Lua/<name>/manifest.lua
 /// - Modules are cached in memory in the internal _moduleCache dictionary
 /// - The implementation avoids relying on MoonSharp's FileSystemScriptLoader. providing predictable behavior
 /// regardless of how the project is distributed.
@@ -21,6 +21,9 @@ public static partial class Loader
 {
     private static Script? _script;
     private static Table? _rootTable;
+    private static string? _modulesRoot;
+    private static Table? _packageTable;
+    private static Table? _packageLoaded;
     private static string _loadedFile = string.Empty;
     private static readonly Dictionary<string, DynValue> _moduleCache = new(StringComparer.OrdinalIgnoreCase);
 
@@ -75,49 +78,85 @@ public static partial class Loader
 
     /// <summary>
     /// Implementation of require() that loads modules from Content/Lua.
-    /// Supports paths like "folder/module" or "module". Looks for module.lua and module/init.lua.
+    /// Supports paths like "folder/module" or "module". Looks for module.lua.
     /// Caches modules in _moduleCache for behavior similar to package.loaded.
     /// </summary>
     private static DynValue RequireModule(string moduleName)
     {
         if (_script == null) throw new InvalidOperationException("Script not initialized");
-        if (string.IsNullOrEmpty(moduleName)) return DynValue.Nil;
+        if (string.IsNullOrWhiteSpace(moduleName)) return DynValue.Nil;
+
         if (_moduleCache.TryGetValue(moduleName, out var cached)) return cached;
 
-        try
+        if (_packageLoaded != null)
         {
-            var glob = _script.Globals.Get(moduleName);
-            if (!glob.IsNil())
+            DynValue maybe = _packageLoaded.Get(moduleName);
+            if (!maybe.IsNil())
             {
-                _moduleCache[moduleName] = glob;
-                return glob;
+                _moduleCache[moduleName] = maybe;
+                return maybe;
             }
-        }
-        catch
-        {
         }
 
         string normalized = moduleName.Replace('.', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar);
-        string baseLua = Path.Combine("Mods");
+        string baseLua = _modulesRoot ?? Path.Combine("Content", "Lua");
 
         var candidates = new List<string>
         {
             Path.Combine(baseLua, normalized + ".lua"),
+            Path.Combine(baseLua, normalized, "init.lua"),
+            Path.Combine(baseLua, normalized, "manifest.lua"),
             Path.Combine(baseLua, "defs", normalized + ".lua"),
         };
 
         foreach (var candidate in candidates)
         {
+            Console.WriteLine($"[Require] trying: {candidate}");
             if (File.Exists(candidate))
             {
-                DynValue result = _script.DoFile(candidate);
-                _moduleCache[moduleName] = result ?? DynValue.Nil;
-                return result ?? DynValue.Nil;
+                if (_packageLoaded != null)
+                    _packageLoaded.Set(moduleName, DynValue.NewBoolean(true));
+
+                DynValue result = null!;
+                try{
+                    result = _script.DoFile(candidate);
+                }
+                catch (ScriptRuntimeException){
+                    throw;
+                }
+
+                if (result == null || result.IsNil())
+                {
+                    if (_packageLoaded != null)
+                    {
+                        var maybe = _packageLoaded.Get(moduleName);
+                        if (!maybe.IsNil())
+                            result = maybe;
+                    }
+
+                    if (result == null || result.IsNil())
+                    {
+                        string last = moduleName.Contains('.') ? moduleName.Substring(moduleName.LastIndexOf('.') + 1) : moduleName;
+                        DynValue g = _script.Globals.Get(last);
+                        if (!g.IsNil())
+                            result = g;
+                    }
+                }
+
+                if (result == null || result.IsNil())
+                    result = DynValue.NewBoolean(true);
+
+                _moduleCache[moduleName] = result;
+                _packageLoaded?.Set(moduleName, result);
+
+                return result;
             }
         }
 
         _moduleCache[moduleName] = DynValue.Nil;
-        return DynValue.Nil;
+        _packageLoaded?.Set(moduleName, DynValue.Nil);
+
+        throw new ScriptRuntimeException($"module '{moduleName}' not found (looked under '{baseLua}')");
     }
 
     #region Conversion Helpers

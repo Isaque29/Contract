@@ -5,15 +5,15 @@ namespace Contract.Lib;
 
 /// <summary>
 /// Public class Loader that provides:
-/// - Initialization and reloading of a main Lua file (default /Mod/manifest.lua)
+/// - Initialization and reloading of a main Lua file (default /Content/Lua/manifest.lua)
 /// - Simplified access to nested values ​​via Loader.Load<T>("a.b.c")
 /// - TryLoad<T>() and Load<T>(path, defaultValue)
 /// - Guaranteed require() functionality for modules in Content/Lua (with caching similar to package.loaded)
-/// - Reading Lua source code in /Mod
+/// - Reading Lua source code in /Content/Lua
 /// - Version lookup (GetVersion)
 ///
 /// Design notes:
-/// - Require resolves modules by querying /Mod/<name>.lua and /Mod/<name>/manifest.lua
+/// - Require resolves modules by querying /Content/Lua/<name>.lua and /Content/Lua/<name>/manifest.lua
 /// - Modules are cached in memory in the internal _moduleCache dictionary
 /// - The implementation avoids relying on MoonSharp's FileSystemScriptLoader. providing predictable behavior
 /// regardless of how the project is distributed.
@@ -24,7 +24,7 @@ public static partial class Loader
     /// Initializes the Lua runtime by loading the specified file (default: modkit.lua in Content/Lua).
     /// Registers the require(name) function that searches for modules in Content/Lua.
     /// </summary>
-    public static void Initialize(string rootDirectory, bool forced = false)
+    public static void Initialize(string rootDirectory = "Content/Lua", bool forced = false)
     {
         if (!forced && _script != null && string.Equals(_loadedFile, "manifest.lua", StringComparison.OrdinalIgnoreCase))
             return;
@@ -33,22 +33,50 @@ public static partial class Loader
         if (!File.Exists(fullPath))
             throw new FileNotFoundException($"Lua file not found: {fullPath}", fullPath);
 
-        _script = new Script(CoreModules.Preset_SoftSandbox);
+        _script = new Script(CoreModules.Preset_Default);
+        _script.Options.DebugPrint = s => Console.WriteLine("[Lua] " + s);
+        _modulesRoot = rootDirectory;
+
+        _packageTable = new Table(_script);
+        _packageLoaded = new Table(_script);
+        _packageTable.Set("loaded", DynValue.NewTable(_packageLoaded));
+        _script.Globals.Set("package", DynValue.NewTable(_packageTable));
+
         _script.Globals.Set("require", DynValue.NewCallback((ctx, args) =>
         {
             if (args == null || args.Count == 0) return DynValue.Nil;
-            string modName = args[0].CastToString();
-            return RequireModule(modName);
+            string modName = args[0].CastToString() ?? string.Empty;
+            try{
+                return RequireModule(modName);
+            }
+            catch (ScriptRuntimeException){
+                throw;
+            }
+            catch (Exception ex){
+                throw new ScriptRuntimeException($"error loading module '{modName}': {ex.Message}");
+            }
         }));
 
-        DynValue dv = _script.DoFile(fullPath);
-        if (dv.Type != DataType.Table)
-            throw new InvalidDataException($"Lua file must return a table at top level: {fullPath}");
+        try
+        {
+            DynValue dv = _script.DoFile(fullPath);
+            if (dv.Type != DataType.Table)
+                throw new InvalidDataException($"Lua file must return a table at top level: {fullPath}");
 
-        _rootTable = dv.Table;
-        _loadedFile = "manifest.lua";
-        _moduleCache.Clear();
+            _rootTable = dv.Table;
+            _loadedFile = "manifest.lua";
+            _moduleCache.Clear();
+        }
+        catch (ScriptRuntimeException ex)
+        {
+            Console.WriteLine("Lua runtime error while loading manifest.lua:");
+            Console.WriteLine(ex.DecoratedMessage ?? ex.ToString());
+            throw;
+        }
+
+        Console.WriteLine($"[Contract] game loaded with {Load<string>("version")}");
     }
+
     /// <summary>
     /// Reloads the currently loaded script (or another if specified).
     /// </summary>
@@ -82,7 +110,7 @@ public static partial class Loader
         if (_script == null || _rootTable == null)
             throw new InvalidOperationException("Scripting runtime not initialized.");
 
-        string[] parts = path.Split(new[] { '/', '.' }, StringSplitOptions.RemoveEmptyEntries);
+        string[] parts = path.Split(['/', '.'], StringSplitOptions.RemoveEmptyEntries);
 
         DynValue configs = _rootTable.Get("configs");
         if (!configs.IsNil() && configs.Type == DataType.Table)

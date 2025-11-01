@@ -12,7 +12,7 @@ public class ContractGame : Game
     public ContractGame()
     {
         _graphics = new GraphicsDeviceManager(this);
-        Content.RootDirectory = "Mod";
+        Content.RootDirectory = "Content";
         IsMouseVisible = true;
 
         _graphics.PreferredBackBufferWidth = _screenWidth;
@@ -21,11 +21,8 @@ public class ContractGame : Game
 
     protected override void Initialize()
     {
-        Loader.Initialize(Content.RootDirectory);
+        Loader.Initialize();
         base.Initialize();
-
-        string v = Loader.Load<string>("version");
-        Console.WriteLine($"Loading Contract with version {v}");
     }
 
     protected override void LoadContent()
